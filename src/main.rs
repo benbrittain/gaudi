@@ -2,27 +2,20 @@ fn main() {
     println!("Hello, world!");
 }
 
-//pub mod google {
-//    #[path = ""]
-//    pub mod rpc{
-//        #[path = "google.api"]
-//        pub mod rpc;
-//    }
-//}
-
 pub mod api {
-//    //mod google {
-//    //    mod rpc {
-//    //        tonic::include_proto!("google.rpc");
-//    //    }
-//    //}
     mod google {
-        mod rpc {
-            tonic::include_proto!("google.api");
+        pub mod longrunning {
+            tonic::include_proto!("google.longrunning");
+        }
+        pub mod rpc {
+            tonic::include_proto!("google.rpc");
         }
     }
     mod build {
         mod bazel {
+            mod semver {
+                tonic::include_proto!("build.bazel.semver");
+            }
             mod remote {
                 mod execution {
                     mod v2 {
