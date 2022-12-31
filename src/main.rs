@@ -1,7 +1,22 @@
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
+use tracing::{info, instrument};
 
 mod api;
+
+#[derive(Debug, Default)]
+pub struct MyCaps {}
+
+#[tonic::async_trait]
+impl api::Capabilities for MyCaps {
+    #[instrument]
+    async fn get_capabilities(
+        &self,
+        _request: Request<api::GetCapabilitiesRequest>,
+    ) -> Result<Response<api::ServerCapabilities>, Status> {
+        todo!()
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct MyExecution {}
@@ -10,6 +25,7 @@ pub struct MyExecution {}
 impl api::Execution for MyExecution {
     type ExecuteStream = ReceiverStream<Result<api::longrunning::Operation, Status>>;
 
+    #[instrument]
     async fn execute(
         &self,
         _request: Request<api::ExecuteRequest>,
@@ -19,6 +35,7 @@ impl api::Execution for MyExecution {
 
     type WaitExecutionStream = ReceiverStream<Result<api::longrunning::Operation, Status>>;
 
+    #[instrument]
     async fn wait_execution(
         &self,
         _request: Request<api::WaitExecutionRequest>,
@@ -34,6 +51,7 @@ pub struct MyCAS {}
 impl api::ContentAddressableStorage for MyCAS {
     type GetTreeStream = ReceiverStream<Result<api::GetTreeResponse, Status>>;
 
+    #[instrument]
     async fn get_tree(
         &self,
         _request: Request<api::GetTreeRequest>,
@@ -41,6 +59,7 @@ impl api::ContentAddressableStorage for MyCAS {
         todo!()
     }
 
+    #[instrument]
     async fn find_missing_blobs(
         &self,
         _request: Request<api::FindMissingBlobsRequest>,
@@ -48,6 +67,7 @@ impl api::ContentAddressableStorage for MyCAS {
         todo!()
     }
 
+    #[instrument]
     async fn batch_update_blobs(
         &self,
         _request: Request<api::BatchUpdateBlobsRequest>,
@@ -55,6 +75,7 @@ impl api::ContentAddressableStorage for MyCAS {
         todo!()
     }
 
+    #[instrument]
     async fn batch_read_blobs(
         &self,
         _request: Request<api::BatchReadBlobsRequest>,
@@ -65,13 +86,19 @@ impl api::ContentAddressableStorage for MyCAS {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50051".parse()?;
+    tracing_subscriber::fmt::init();
+    info!("Initialized.");
+
+    let addr = "[::1]:8980".parse()?;
     let exec = MyExecution::default();
     let cas = MyCAS::default();
+    let caps = MyCaps::default();
 
+    info!("Serving.");
     Server::builder()
         .add_service(api::ExecutionServer::new(exec))
         .add_service(api::ContentAddressableStorageServer::new(cas))
+        .add_service(api::CapabilitiesServer::new(caps))
         .serve(addr)
         .await?;
 

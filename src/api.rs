@@ -1,3 +1,4 @@
+pub use build::bazel::remote::execution::v2::capabilities_server::*;
 pub use build::bazel::remote::execution::v2::content_addressable_storage_server::*;
 pub use build::bazel::remote::execution::v2::execution_server::*;
 pub use build::bazel::remote::execution::v2::*;
