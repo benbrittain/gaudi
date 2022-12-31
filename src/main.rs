@@ -5,6 +5,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, instrument};
 
+mod action_runner;
 mod api;
 mod blob;
 mod content_storage;
@@ -58,14 +59,13 @@ impl api::Capabilities for MyCaps {
     }
 }
 
-#[derive(Debug)]
 pub struct MyExecution {
-    //    sled: sled::Db,
+    cas: ContentStorage,
 }
 
 impl MyExecution {
-    pub fn new() -> Self {
-        MyExecution {}
+    pub fn new(cas: ContentStorage) -> Self {
+        MyExecution { cas }
     }
 }
 
@@ -78,11 +78,28 @@ impl api::Execution for MyExecution {
         &self,
         request: Request<api::ExecuteRequest>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let action_digest = request.into_inner().action_digest.unwrap();
-        info!("Getting: {:?}", &action_digest);
-        //        let content = self.sled.get(action_digest.hash).unwrap();
-        //        assert_eq!(action_digest.size_bytes, content.size());
-        //       info!("{:?}", &content);
+        let request = request.into_inner();
+        let action_digest = request
+            .action_digest
+            .ok_or(Status::invalid_argument("no action digest"))?;
+        let instance = request.instance_name;
+
+        let action: api::Action = self
+            .cas
+            .get_proto(&instance, action_digest)
+            .await
+            .map_err(|_| Status::invalid_argument("bad action proto"))?;
+
+        info!("Action: {:?}", action);
+
+        let command_digest = action.command_digest.ok_or(Status::invalid_argument(
+            "Invalid Action: no command digest",
+        ))?;
+        let root_digest = action
+            .input_root_digest
+            .ok_or(Status::invalid_argument("Invalid Action: no root digest"))?;
+
+        let mut action = action_runner::run(command_digest, root_digest, action.timeout);
         todo!()
     }
 
@@ -181,7 +198,6 @@ impl api::ByteStream for MyBytestream {
                 .await
                 .map_err(|_| Status::internal("content store could not write data"))?;
             info!("Bytes written: {}", bytes_written);
-            //let s = String::from_utf8_lossy(&write_req.data);
             size += bytes_written;
         }
         Ok(Response::new(api::WriteResponse {
@@ -264,12 +280,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr = args.addr;
     let cas_dir = args.dir;
+
+    // We rely heavily on openat2
     assert!(openat2::has_openat2());
+
     info!("Initialized.");
 
     let content_storage = ContentStorage::new(cas_dir)?;
 
-    let exec = MyExecution::new();
+    let exec = MyExecution::new(content_storage);
     let cas = MyCAS::default();
     let caps = MyCaps::default();
     let action_cache = MyActionCache::default();

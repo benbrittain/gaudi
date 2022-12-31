@@ -1,9 +1,10 @@
+use crate::api;
 use openat2::*;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, instrument};
 use uuid::Uuid;
 
@@ -20,11 +21,14 @@ pub enum CasError {
     #[error("Path passed for CAS root directory is not a directory")]
     NotDirectory,
 
+    #[error("Proto did not decode cleanly")]
+    InvalidProto,
+
     #[error("unknown data store error")]
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ContentStorage {
     root_fd: RawFd,
 }
@@ -41,6 +45,19 @@ impl ContentStorage {
         let root_fd = openat2(None, root_path, &how)?;
 
         Ok(ContentStorage { root_fd })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn get_proto<T: prost::Message + Default>(
+        &self,
+        instance: &str,
+        digest: api::Digest,
+    ) -> Result<T, CasError> {
+        info!("digest: {:?}", digest);
+        let mut blob = self.get_blob(instance, &digest.hash).await?;
+        let mut buf = vec![];
+        blob.file().read_to_end(&mut buf).await?;
+        T::decode(&mut std::io::Cursor::new(buf)).map_err(|_| CasError::InvalidProto)
     }
 
     #[instrument(skip(self))]
