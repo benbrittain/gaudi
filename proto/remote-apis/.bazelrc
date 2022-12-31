@@ -1,2 +1,0 @@
-# Include comments in generated code for godoc.
-build --experimental_proto_descriptor_sets_include_source_info
