@@ -1,0 +1,101 @@
+workspace(name = "bazel_remote_apis")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "bazel_skylib",
+    sha256 = "97e70364e9249702246c0e9444bccdc4b847bed1eb03c5a3ece4f83dfe6abc44",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.0.2/bazel-skylib-1.0.2.tar.gz",
+        "https://github.com/bazelbuild/bazel-skylib/releases/download/1.0.2/bazel-skylib-1.0.2.tar.gz",
+    ],
+)
+
+load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
+
+bazel_skylib_workspace()
+
+# Pull in go rules, which we need in order to selectively pull in Go dependencies.
+http_archive(
+    name = "io_bazel_rules_go",
+    sha256 = "69de5c704a05ff37862f7e0f5534d4f479418afc21806c887db544a316f3cb6b",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.27.0/rules_go-v0.27.0.tar.gz",
+        "https://github.com/bazelbuild/rules_go/releases/download/v0.27.0/rules_go-v0.27.0.tar.gz",
+    ],
+)
+
+# Gazelle, which we need in order to selectively pull in Gazelle dependencies for Go.
+http_archive(
+    name = "bazel_gazelle",
+    sha256 = "62ca106be173579c0a167deb23358fdfe71ffa1e4cfdddf5582af26520f1c66f",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-gazelle/releases/download/v0.23.0/bazel-gazelle-v0.23.0.tar.gz",
+        "https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.23.0/bazel-gazelle-v0.23.0.tar.gz",
+    ],
+)
+
+# Needed for protobuf.
+http_archive(
+    name = "com_google_protobuf",
+    sha256 = "678d91d8a939a1ef9cb268e1f20c14cd55e40361dc397bb5881e4e1e532679b1",
+    strip_prefix = "protobuf-3.10.1",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/v3.10.1.zip"],
+)
+
+load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+
+protobuf_deps()
+
+# Needed for C++ gRPC.
+http_archive(
+    name = "com_github_grpc_grpc",
+    sha256 = "b391a327429279f6f29b9ae7e5317cd80d5e9d49cc100e6d682221af73d984a6",
+    strip_prefix = "grpc-93e8830070e9afcbaa992c75817009ee3f4b63a0",  # v1.24.3 with fixes
+    urls = ["https://github.com/grpc/grpc/archive/93e8830070e9afcbaa992c75817009ee3f4b63a0.zip"],
+)
+
+# Pull in all gRPC dependencies.
+load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
+
+grpc_deps()
+
+# More gRPC dependencies. grpc_extra_deps does not work out of the box.
+load("@upb//bazel:workspace_deps.bzl", "upb_deps")
+load("@build_bazel_rules_apple//apple:repositories.bzl", "apple_rules_dependencies")
+load("@build_bazel_apple_support//lib:repositories.bzl", "apple_support_dependencies")
+
+upb_deps()
+
+apple_rules_dependencies()
+
+apple_support_dependencies()
+
+load("@upb//bazel:repository_defs.bzl", "bazel_version_repository")
+
+bazel_version_repository(
+    name = "bazel_version",
+)
+
+bind(
+    name = "grpc_cpp_plugin",
+    actual = "@com_github_grpc_grpc//:grpc_cpp_plugin",
+)
+
+bind(
+    name = "grpc_lib",
+    actual = "@com_github_grpc_grpc//:grpc++",
+)
+
+load("//:remote_apis_deps.bzl", "remote_apis_go_deps")
+
+remote_apis_go_deps()
+
+# Needed for the googleapis protos.
+http_archive(
+    name = "googleapis",
+    build_file = "BUILD.googleapis",
+    sha256 = "7b6ea252f0b8fb5cd722f45feb83e115b689909bbb6a393a873b6cbad4ceae1d",
+    strip_prefix = "googleapis-143084a2624b6591ee1f9d23e7f5241856642f4d",
+    urls = ["https://github.com/googleapis/googleapis/archive/143084a2624b6591ee1f9d23e7f5241856642f4d.zip"],
+)
