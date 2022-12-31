@@ -14,7 +14,7 @@ pub enum BlobError {
 
 #[derive(Debug)]
 pub struct Blob {
-    file: tokio::fs::File,
+    file: fs::File,
 }
 
 async fn asyncify<F, T>(f: F) -> io::Result<T>
@@ -40,8 +40,8 @@ impl Blob {
         let path: PathBuf = [instance, hash].iter().collect();
         let file = asyncify(move || {
             let mut how = OpenHow::new(
-                libc::O_CLOEXEC | libc::O_LARGEFILE | libc::O_CREAT,
-                libc::S_IWUSR | libc::S_IXUSR | libc::S_IRUSR,
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_LARGEFILE | libc::O_CREAT,
+                0o644,
             );
             how.resolve |= ResolveFlags::NO_SYMLINKS;
             how.resolve |= ResolveFlags::IN_ROOT;
@@ -52,5 +52,9 @@ impl Blob {
         .await?;
 
         Ok(Blob { file })
+    }
+
+    pub fn file(&mut self) -> &mut fs::File {
+        &mut self.file
     }
 }

@@ -3,6 +3,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tracing::{info, instrument};
 use uuid::Uuid;
 
@@ -50,7 +51,7 @@ impl ContentStorage {
     }
 
     /// Write the specified blob of data to the file.
-    #[instrument(skip(self, _data))]
+    #[instrument(skip(self, data))]
     pub async fn write_data(
         &self,
         instance: &str,
@@ -59,15 +60,14 @@ impl ContentStorage {
         size: usize,
         write_offset: i64,
         finish_write: bool,
-        _data: &[u8],
+        data: &[u8],
     ) -> Result<usize, CasError> {
-        let blob = self.get_blob(instance, hash).await?;
-        info!("BLOB: {:?}", blob);
-
+        let mut blob = self.get_blob(instance, hash).await?;
         // only support really small stuff right now
         assert!(finish_write);
-        info!("writing");
 
-        Err(CasError::Unknown)
+        let bytes_written = blob.file().write(data).await?;
+        blob.file().flush().await?;
+        Ok(bytes_written)
     }
 }
