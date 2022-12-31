@@ -1,46 +1,201 @@
+use std::{net::SocketAddr, path::PathBuf};
+
+use clap::Parser;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, instrument};
 
 mod api;
+mod blob;
+mod content_storage;
+use content_storage::ContentStorage;
 
 #[derive(Debug, Default)]
 pub struct MyCaps {}
 
 #[tonic::async_trait]
 impl api::Capabilities for MyCaps {
-    #[instrument]
+    #[instrument(skip_all)]
     async fn get_capabilities(
         &self,
-        _request: Request<api::GetCapabilitiesRequest>,
+        request: Request<api::GetCapabilitiesRequest>,
     ) -> Result<Response<api::ServerCapabilities>, Status> {
-        todo!()
+        info!("Instance: {}", request.get_ref().instance_name);
+        let api_version = api::SemVer {
+            major: 2,
+            minor: 0,
+            patch: 0,
+            prerelease: String::default(),
+        };
+
+        let cache_capabilities = api::CacheCapabilities {
+            digest_functions: vec![api::digest_function::Value::Sha256.into()],
+            action_cache_update_capabilities: Some(api::ActionCacheUpdateCapabilities {
+                update_enabled: true,
+            }),
+            cache_priority_capabilities: None,
+            max_batch_total_size_bytes: 0,
+            symlink_absolute_path_strategy: 0,
+            supported_compressors: vec![],
+            supported_batch_update_compressors: vec![],
+        };
+
+        let exec_caps = api::ExecutionCapabilities {
+            digest_function: api::digest_function::Value::Sha256.into(),
+            exec_enabled: true,
+            execution_priority_capabilities: None,
+            supported_node_properties: vec![],
+        };
+
+        let caps = api::ServerCapabilities {
+            cache_capabilities: Some(cache_capabilities),
+            execution_capabilities: Some(exec_caps),
+            deprecated_api_version: None,
+            low_api_version: Some(api_version.clone()),
+            high_api_version: Some(api_version.clone()),
+        };
+        Ok(Response::new(caps))
     }
 }
 
-#[derive(Debug, Default)]
-pub struct MyExecution {}
+#[derive(Debug)]
+pub struct MyExecution {
+    //    sled: sled::Db,
+}
+
+impl MyExecution {
+    pub fn new() -> Self {
+        MyExecution {}
+    }
+}
 
 #[tonic::async_trait]
 impl api::Execution for MyExecution {
     type ExecuteStream = ReceiverStream<Result<api::longrunning::Operation, Status>>;
 
-    #[instrument]
+    #[instrument(skip_all, fields(instance = request.get_ref().instance_name))]
     async fn execute(
         &self,
-        _request: Request<api::ExecuteRequest>,
+        request: Request<api::ExecuteRequest>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
+        let action_digest = request.into_inner().action_digest.unwrap();
+        info!("Getting: {:?}", &action_digest);
+        //        let content = self.sled.get(action_digest.hash).unwrap();
+        //        assert_eq!(action_digest.size_bytes, content.size());
+        //       info!("{:?}", &content);
         todo!()
     }
 
     type WaitExecutionStream = ReceiverStream<Result<api::longrunning::Operation, Status>>;
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn wait_execution(
         &self,
         _request: Request<api::WaitExecutionRequest>,
     ) -> Result<Response<Self::WaitExecutionStream>, Status> {
+        info!("");
         todo!()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MyActionCache {}
+
+#[tonic::async_trait]
+impl api::ActionCache for MyActionCache {
+    #[instrument(skip_all)]
+    async fn get_action_result(
+        &self,
+        _request: Request<api::GetActionResultRequest>,
+    ) -> Result<Response<api::ActionResult>, Status> {
+        info!("Not implemented");
+        Err(Status::not_found("BWB Not implemented"))
+    }
+    #[instrument(skip_all)]
+    async fn update_action_result(
+        &self,
+        _request: Request<api::UpdateActionResultRequest>,
+    ) -> Result<Response<api::ActionResult>, Status> {
+        info!("Not implemented");
+        Err(Status::resource_exhausted("BWB No more"))
+    }
+}
+
+#[derive(Debug)]
+pub struct MyBytestream {
+    content_store: ContentStorage,
+    //    sled: sled::Db,
+}
+
+impl MyBytestream {
+    pub fn new(content_store: ContentStorage) -> Self {
+        MyBytestream { content_store }
+    }
+}
+
+#[tonic::async_trait]
+impl api::ByteStream for MyBytestream {
+    type ReadStream = ReceiverStream<Result<api::ReadResponse, Status>>;
+
+    #[instrument(skip_all)]
+    async fn read(
+        &self,
+        _request: Request<api::ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        info!("");
+        todo!()
+    }
+
+    #[instrument(skip_all)]
+    async fn write(
+        &self,
+        request: Request<tonic::Streaming<api::WriteRequest>>,
+    ) -> Result<Response<api::WriteResponse>, Status> {
+        let mut stream = request.into_inner();
+        let mut size: usize = 0;
+        if let Some(write_req) = stream.message().await? {
+            info!("Name: {:?}", &write_req.resource_name);
+            let segments: Vec<&str> = write_req.resource_name.split("/").collect();
+            let instance = segments[0];
+            assert_eq!("uploads", segments[1]);
+            let uuid = uuid::Uuid::parse_str(segments[2])
+                .map_err(|_| Status::invalid_argument("not a valid uuid"))?;
+            assert_eq!("blobs", segments[3]);
+            let hash = segments[4];
+            let data_size: usize = segments[5]
+                .parse()
+                .map_err(|_| Status::invalid_argument("bad size value"))?;
+
+            info!("Writing to blob");
+            let bytes_written = self
+                .content_store
+                .write_data(
+                    instance,
+                    uuid,
+                    hash,
+                    data_size,
+                    write_req.write_offset,
+                    write_req.finish_write,
+                    &write_req.data,
+                )
+                .await
+                .map_err(|_| Status::internal("content store could not write data"))?;
+            info!("Bytes written: {}", bytes_written);
+            //let s = String::from_utf8_lossy(&write_req.data);
+            size += bytes_written;
+        }
+        Ok(Response::new(api::WriteResponse {
+            committed_size: size as i64,
+        }))
+    }
+
+    #[instrument(skip_all, fields(resource = _request.get_ref().resource_name))]
+    async fn query_write_status(
+        &self,
+        _request: Request<api::QueryWriteStatusRequest>,
+    ) -> Result<Response<api::QueryWriteStatusResponse>, Status> {
+        info!("Checking...");
+        Err(Status::not_found("BWB TODO"))
     }
 }
 
@@ -51,53 +206,81 @@ pub struct MyCAS {}
 impl api::ContentAddressableStorage for MyCAS {
     type GetTreeStream = ReceiverStream<Result<api::GetTreeResponse, Status>>;
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn get_tree(
         &self,
         _request: Request<api::GetTreeRequest>,
     ) -> Result<Response<Self::GetTreeStream>, Status> {
+        info!("");
         todo!()
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn find_missing_blobs(
         &self,
-        _request: Request<api::FindMissingBlobsRequest>,
+        request: Request<api::FindMissingBlobsRequest>,
     ) -> Result<Response<api::FindMissingBlobsResponse>, Status> {
-        todo!()
+        let resp = api::FindMissingBlobsResponse {
+            missing_blob_digests: request.get_ref().blob_digests.clone(),
+        };
+        info!("Find all blobs");
+        Ok(Response::new(resp))
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn batch_update_blobs(
         &self,
         _request: Request<api::BatchUpdateBlobsRequest>,
     ) -> Result<Response<api::BatchUpdateBlobsResponse>, Status> {
+        info!("");
         todo!()
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn batch_read_blobs(
         &self,
         _request: Request<api::BatchReadBlobsRequest>,
     ) -> Result<Response<api::BatchReadBlobsResponse>, Status> {
+        info!("");
         todo!()
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Address to listen on for remote execution requests.
+    #[arg(short, long)]
+    addr: SocketAddr,
+
+    /// Storage directory.
+    #[arg(short, long)]
+    dir: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    let args = Args::parse();
+    let addr = args.addr;
+    let cas_dir = args.dir;
+    assert!(openat2::has_openat2());
     info!("Initialized.");
 
-    let addr = "[::1]:8980".parse()?;
-    let exec = MyExecution::default();
+    let content_storage = ContentStorage::new(cas_dir)?;
+
+    let exec = MyExecution::new();
     let cas = MyCAS::default();
     let caps = MyCaps::default();
+    let action_cache = MyActionCache::default();
+    let byte_stream = MyBytestream::new(content_storage);
 
-    info!("Serving.");
+    info!("Serving on {}", addr);
     Server::builder()
         .add_service(api::ExecutionServer::new(exec))
         .add_service(api::ContentAddressableStorageServer::new(cas))
+        .add_service(api::ActionCacheServer::new(action_cache))
+        .add_service(api::ByteStreamServer::new(byte_stream))
         .add_service(api::CapabilitiesServer::new(caps))
         .serve(addr)
         .await?;
