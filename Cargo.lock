@@ -186,9 +186,11 @@ dependencies = [
 name = "gaudi"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "prost",
  "prost-types",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]
