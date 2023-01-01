@@ -1,5 +1,6 @@
 use crate::api;
 use openat2::*;
+use prost::DecodeError;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -21,8 +22,8 @@ pub enum CasError {
     #[error("Path passed for CAS root directory is not a directory")]
     NotDirectory,
 
-    #[error("Proto did not decode cleanly")]
-    InvalidProto,
+    #[error("Proto did not decode cleanly: {0}")]
+    InvalidProto(DecodeError),
 
     #[error("unknown data store error")]
     Unknown,
@@ -51,13 +52,13 @@ impl ContentStorage {
     pub async fn get_proto<T: prost::Message + Default>(
         &self,
         instance: &str,
-        digest: api::Digest,
+        digest: &api::Digest,
     ) -> Result<T, CasError> {
         info!("digest: {:?}", digest);
         let mut blob = self.get_blob(instance, &digest.hash).await?;
         let mut buf = vec![];
         blob.file().read_to_end(&mut buf).await?;
-        T::decode(&mut std::io::Cursor::new(buf)).map_err(|_| CasError::InvalidProto)
+        T::decode(&mut std::io::Cursor::new(buf)).map_err(|e| CasError::InvalidProto(e))
     }
 
     #[instrument(skip(self))]

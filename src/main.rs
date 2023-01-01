@@ -5,6 +5,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, instrument};
 
+mod action;
 mod action_runner;
 mod api;
 mod blob;
@@ -86,7 +87,7 @@ impl api::Execution for MyExecution {
 
         let action: api::Action = self
             .cas
-            .get_proto(&instance, action_digest)
+            .get_proto(&instance, &action_digest)
             .await
             .map_err(|_| Status::invalid_argument("bad action proto"))?;
 
@@ -99,7 +100,10 @@ impl api::Execution for MyExecution {
             .input_root_digest
             .ok_or(Status::invalid_argument("Invalid Action: no root digest"))?;
 
-        let mut action = action_runner::run(command_digest, root_digest, action.timeout);
+        info!("command: {:?}", command_digest);
+        let resp = action_runner::run(&self.cas, command_digest, root_digest, action.timeout).await;
+        dbg!(resp);
+
         todo!()
     }
 

@@ -16,6 +16,9 @@ clap = { version = "4.0.32", features = ["derive"] }
 thiserror = "1.0.38"
 libc = "0.2.139"
 openat2 = "0.1.2"
+# tracing-test = "0.2.3"
+walkdir = "2.3.2"
+futures = "0.3.25"
 
 [dependencies.uuid]
 version = "1.2.2"
