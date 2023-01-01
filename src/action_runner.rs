@@ -29,8 +29,8 @@ pub enum ActionError {
 
 #[derive(Debug)]
 struct Mapping {
-    path: PathBuf,
-    digest: api::Digest,
+    dest_path: PathBuf,
+    source_path: PathBuf,
 }
 
 #[instrument(skip_all)]
@@ -43,10 +43,14 @@ fn create_mapping<'a>(
     Box::pin(async move {
         assert_eq!(dir.symlinks.len(), 0);
         for file in dir.files {
-            let mut path = root.clone();
-            path.push(&file.name);
-            let digest = file.digest.unwrap();
-            mapping.push(Mapping { path, digest });
+            let mut dest_path = root.clone();
+            dest_path.push(&file.name);
+
+            let mut source_path = cas.get_root_path().to_path_buf();
+            source_path.push("remote-execution");
+            source_path.push(file.digest.expect("must have a digest").hash);
+
+            mapping.push(Mapping { dest_path, source_path });
         }
         for directory_node in &dir.directories {
             info!("dir_node: {:#?}", &directory_node.name);

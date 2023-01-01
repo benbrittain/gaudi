@@ -145,7 +145,6 @@ impl api::ActionCache for MyActionCache {
 #[derive(Debug)]
 pub struct MyBytestream {
     content_store: ContentStorage,
-    //    sled: sled::Db,
 }
 
 impl MyBytestream {
@@ -292,11 +291,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let content_storage = ContentStorage::new(cas_dir)?;
 
-    let exec = MyExecution::new(content_storage);
+    let exec = MyExecution::new(content_storage.clone());
     let cas = MyCAS::default();
     let caps = MyCaps::default();
     let action_cache = MyActionCache::default();
-    let byte_stream = MyBytestream::new(content_storage);
+    let byte_stream = MyBytestream::new(content_storage.clone());
 
     info!("Serving on {}", addr);
     Server::builder()

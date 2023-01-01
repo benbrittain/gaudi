@@ -3,7 +3,7 @@ use openat2::*;
 use prost::DecodeError;
 use std::io;
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, instrument};
@@ -29,23 +29,29 @@ pub enum CasError {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ContentStorage {
+    root_path: PathBuf,
     root_fd: RawFd,
 }
 
 impl ContentStorage {
     #[instrument]
     pub fn new(root_path: PathBuf) -> Result<Self, CasError> {
+        let root_path = std::fs::canonicalize(root_path)?;
         // TODO make a root handle for each instance instead of just one per CAS
         std::fs::create_dir_all(&root_path.join("remote-execution"))?;
         info!("Storage: {}", std::fs::canonicalize(&root_path)?.display());
 
         let mut how = OpenHow::new(libc::O_CLOEXEC | libc::O_DIRECTORY, 0);
         how.resolve |= ResolveFlags::NO_SYMLINKS;
-        let root_fd = openat2(None, root_path, &how)?;
+        let root_fd = openat2(None, &root_path, &how)?;
 
-        Ok(ContentStorage { root_fd })
+        Ok(ContentStorage { root_path, root_fd })
+    }
+
+    pub fn get_root_path(&self) -> &Path {
+        &self.root_path
     }
 
     #[instrument(skip(self))]
