@@ -11,6 +11,10 @@ use std::{
     ptr,
 };
 use std::{io, path::Path};
+use std::{
+    io::Write,
+    os::fd::{FromRawFd, IntoRawFd, RawFd},
+};
 use tracing::{info, instrument, span, Level};
 
 use thiserror::Error;
@@ -20,7 +24,7 @@ use crate::action::platform::linux::clone3;
 #[derive(Error, Debug)]
 pub enum ActionError {
     #[error("I/O: {0}")]
-    IoError(#[from] io::Error),
+    SandboxIoError(#[from] io::Error),
     #[error("CAS: {0}")]
     CasError(#[from] CasError),
     #[error("Unknown")]
@@ -50,10 +54,12 @@ fn create_mapping<'a>(
             source_path.push("remote-execution");
             source_path.push(file.digest.expect("must have a digest").hash);
 
-            mapping.push(Mapping { dest_path, source_path });
+            mapping.push(Mapping {
+                dest_path,
+                source_path,
+            });
         }
         for directory_node in &dir.directories {
-            info!("dir_node: {:#?}", &directory_node.name);
             let dir: api::Directory = cas
                 .get_proto("remote-execution", directory_node.digest.as_ref().unwrap())
                 .await?;
@@ -85,7 +91,29 @@ pub async fn run(
     .await?;
     info!("Mapping: {:#?}", mappings);
     // Spawn the child that will fork the sandboxed program with fresh namespaces
-    spawn_sandbox(mappings, || {})?;
+    spawn_sandbox(mappings, || {
+        let x = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo hello")
+            .output();
+        //        let x = std::process::Command::new("/bin/ls").stdoutspawn();
+        info!("ls: {:?}", x);
+        use walkdir::WalkDir;
+
+        for entry in WalkDir::new("/") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            info!("# path: {:?}", path);
+            if path.is_file() {
+                let file = std::fs::File::open(path).unwrap();
+                file.sync_all().unwrap();
+                info!("path: {:?}", file.metadata().unwrap().len());
+                let contents =
+                    std::fs::read_to_string(path).expect("Should have been able to read the file");
+                info!("contents: {:?}", contents);
+            }
+        }
+    })?;
     Ok(())
 }
 
@@ -105,6 +133,34 @@ fn mount_sandbox(path: &Path) -> io::Result<()> {
     err_check(unsafe { libc::chdir(target.as_ptr()) })?;
 
     info!("Entered sandbox.");
+    Ok(())
+}
+
+#[instrument]
+fn setup_user_namespace(outer_uid: u32, outer_gid: u32) -> io::Result<()> {
+    let inner_uid = outer_uid;
+    let inner_gid = outer_gid;
+
+    let path = Path::new("/proc/self/setgroups");
+
+    if path.exists() {
+        info!("proc setgroups exists");
+        let mut map = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/self/setgroups")?;
+        map.write_all(b"deny\n")?;
+    }
+
+    let mut uid_map = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/proc/self/uid_map")?;
+    uid_map.write_all(format!("{} {} 1\n", inner_uid, outer_uid).as_bytes())?;
+    let mut gid_map = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/proc/self/gid_map")?;
+    gid_map.write_all(format!("{} {} 1\n", inner_gid, outer_gid).as_bytes())?;
+
+    info!("Setup User Namespace.");
     Ok(())
 }
 
@@ -139,42 +195,51 @@ pub fn path_to_cstring<P: AsRef<Path>>(path: &P) -> Option<std::ffi::CString> {
         .and_then(|p| std::ffi::CString::new(p).ok())
 }
 
-fn mount_mounts(sandbox_path: &Path) -> io::Result<()> {
-    let dot = CString::new(".")?;
-    err_check(unsafe {
-        libc::mount(
-            dot.as_ptr(),
-            dot.as_ptr(),
-            ptr::null(),
-            libc::MS_BIND,
-            ptr::null(),
-        )
-    })?;
+fn mount_mounts(path: &Path, mount_mapping: Vec<Mapping>) -> io::Result<()> {
+    let empty_file = CString::new("/home/ben/workspace/gaudi/sandbox/tmp/empty_file")?;
+
+    // let dot = path_to_cstring(&path).unwrap();
+    // err_check(unsafe {
+    //     libc::mount(
+    //         dot.as_ptr(),
+    //         dot.as_ptr(),
+    //         ptr::null(),
+    //         libc::MS_BIND,
+    //         ptr::null(),
+    //     )
+    // })?;
     info!("Mount point!");
 
-    let path = std::path::Path::new("/bin/pwd");
-    let uh_path = std::path::Path::new("bin/pwd");
-    let mut full_path = sandbox_path.to_path_buf();
-    full_path.push(uh_path);
-    if let Some(prefix) = full_path.parent() {
-        std::fs::create_dir_all(prefix)?;
+    for mount in mount_mapping {
+        info!(
+            "Binding {} -> {}",
+            mount.source_path.display(),
+            mount.dest_path.display()
+        );
+
+        // create a file to bind against at the depth
+        if let Some(prefix) = mount.dest_path.parent() {
+            std::fs::create_dir_all(prefix)?;
+        }
+        std::fs::File::create(&mount.dest_path)?;
+
+        let src = path_to_cstring(&mount.source_path).unwrap();
+        let target = path_to_cstring(&mount.dest_path).unwrap();
+        //err_check(unsafe {
+        //    libc::link(empty_file.as_ptr(), target.as_ptr())
+        //})?;
+        //info!("linked file");
+
+        err_check(unsafe {
+            libc::mount(
+                src.as_ptr(),
+                target.as_ptr(),
+                ptr::null(),
+                libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY,
+                ptr::null(),
+            )
+        })?;
     }
-    std::fs::File::create(&full_path)?;
-
-    let src = path_to_cstring(&path).unwrap();
-    let target = path_to_cstring(&full_path).unwrap();
-    info!("mounting: {:?} at {:?}", src, target);
-
-    err_check(unsafe {
-        libc::mount(
-            src.as_ptr(),
-            target.as_ptr(),
-            ptr::null(),
-            libc::MS_REC | libc::MS_BIND | libc::MS_RDONLY,
-            ptr::null(),
-        )
-    })?;
-    info!("check!");
 
     Ok(())
 }
@@ -214,20 +279,104 @@ fn change_root() -> io::Result<()> {
     Ok(())
 }
 
+fn mount_proc() -> io::Result<()> {
+    let proc_mnt = CString::new("/proc")?;
+    let proc = CString::new("proc")?;
+    Ok(err_check(unsafe {
+        libc::mount(
+            proc_mnt.as_ptr(),
+            proc_mnt.as_ptr(),
+            proc.as_ptr(),
+            libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
+            ptr::null(),
+        )
+    })?)
+}
+
+fn mount_bin() -> io::Result<()> {
+    let proc_mnt = CString::new("/bin")?;
+    Ok(err_check(unsafe {
+        libc::mount(
+            proc_mnt.as_ptr(),
+            proc_mnt.as_ptr(),
+            ptr::null(),
+            libc::MS_BIND | libc::MS_NOSUID,
+            //libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
+            ptr::null(),
+        )
+    })?)
+}
+
+fn visit_dirs(dir: &Path, cb: &dyn Fn(&std::fs::DirEntry) -> io::Result<()>) -> io::Result<()> {
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit_dirs(&path, cb)?;
+            } else {
+                cb(&entry)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn close_fds() -> io::Result<()> {
+    let dir = Path::new("/proc/self/fd");
+    let file = std::fs::File::open(dir)?;
+    let dir_handle: RawFd = file.into_raw_fd();
+
+    visit_dirs(Path::new("/proc/self/fd"), &|entry| {
+        let path = entry.path();
+        if let Some(num) = path.file_name() {
+            //            println!("pre-fd: {:?}", num);
+            if let Ok(fd) = i32::from_str_radix(num.to_str().unwrap(), 10) {
+                if fd > 2 && fd != dir_handle {
+                    if path.exists() {
+                        println!("closing fd: {}", fd);
+                        let _ = unsafe { std::fs::File::from_raw_fd(fd) };
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn spawn_sandbox<F>(mappings: Vec<Mapping>, sandboxed_func: F) -> io::Result<()>
 where
     F: FnOnce(),
 {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+
     let (child_pid, _pid_fd) = clone3()?;
     let child_span = span!(Level::INFO, "sandbox_process");
     if child_pid == 0 {
         child_span.in_scope(|| {
-            //user_namespace()?;
-            //network_namespace()?;
+            unsafe {
+                // Kill with SIGKILL if Parent dies
+                err_check(libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL))?;
+            }
+
+            info!("Starting setup: ");
+            info!("\t Closing FDs...");
+            //            close_fds()?;
+            info!("\t User...");
+            setup_user_namespace(uid, gid)?;
+            info!("\t Mount...");
             setup_mount_namespace()?;
+            //network_namespace()?;
+            info!("\t Mount Sandbox...");
             mount_sandbox(Path::new("/home/ben/workspace/gaudi/sandbox"))?;
             create_empty_file()?;
-            mount_mounts(Path::new("/home/ben/workspace/gaudi/sandbox"))?;
+            info!("\t Mount Proc...");
+            mount_proc()?;
+            info!("\t Mount mounts...");
+            mount_mounts(Path::new("/home/ben/workspace/gaudi/sandbox"), mappings)?;
+            info!("\t Change Root...");
             change_root()?;
             sandboxed_func();
             std::process::exit(0);
@@ -236,25 +385,7 @@ where
             Ok::<(), io::Error>(())
         })?;
     } else {
-        info!("Parent");
+        info!("Spawned: {}", child_pid);
     }
     Ok(())
-}
-
-#[test]
-#[tracing_test::traced_test]
-fn clone_test() {
-    spawn_sandbox().unwrap();
-    let path = std::env::current_dir();
-    info!("{:?}", path);
-    use walkdir::WalkDir;
-
-    for entry in WalkDir::new("/").min_depth(1) {
-        println!("{}", entry.unwrap().path().display());
-    }
-    //let x = std::process::Command::new("pwd")
-    //    .env("PATH", "/bin")
-    //    .output()
-    //    .expect("failed to execute process");
-    //eprintln!("{:?}", x);
 }

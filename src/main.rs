@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, instrument};
@@ -102,9 +103,11 @@ impl api::Execution for MyExecution {
 
         info!("command: {:?}", command_digest);
         let resp = action_runner::run(&self.cas, command_digest, root_digest, action.timeout).await;
-        dbg!(resp);
+        info!("Resp: {:#?}", resp);
 
-        todo!()
+        let (tx, rx) = mpsc::channel(128);
+        let output_stream = ReceiverStream::new(rx);
+        Ok(Response::new(output_stream as Self::ExecuteStream))
     }
 
     type WaitExecutionStream = ReceiverStream<Result<api::longrunning::Operation, Status>>;
