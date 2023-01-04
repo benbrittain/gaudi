@@ -105,6 +105,7 @@ impl api::Execution for MyExecution {
         let resp = action_runner::run(&self.cas, command_digest, root_digest, action.timeout).await;
         info!("Resp: {:#?}", resp);
 
+        // TODO this needs to return the actual build status
         let (tx, rx) = mpsc::channel(128);
         let output_stream = ReceiverStream::new(rx);
         Ok(Response::new(output_stream as Self::ExecuteStream))
