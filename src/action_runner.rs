@@ -71,6 +71,13 @@ fn create_mapping<'a>(
     })
 }
 
+fn add_direct_mapping(mappings: &mut Vec<Mapping>, path: &str) {
+    mappings.push(Mapping {
+        dest_path: PathBuf::from(format!("/home/ben/workspace/gaudi/sandbox/{}", path)),
+        source_path: PathBuf::from(path),
+    });
+}
+
 #[instrument]
 pub async fn run(
     cas: &ContentStorage,
@@ -89,30 +96,45 @@ pub async fn run(
         &mut mappings,
     )
     .await?;
+
+    // TODO set up build environment better
+    add_direct_mapping(&mut mappings, "/usr/bin/gcc");
+    add_direct_mapping(&mut mappings, "/usr/lib/libc.so.6");
+    add_direct_mapping(&mut mappings, "/usr/lib/libcap.so.2");
+    add_direct_mapping(&mut mappings, "/lib64/ld-linux-x86-64.so.2");
     info!("Mapping: {:#?}", mappings);
+
     // Spawn the child that will fork the sandboxed program with fresh namespaces
     spawn_sandbox(mappings, || {
-        let x = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("echo hello")
-            .output();
-        //        let x = std::process::Command::new("/bin/ls").stdoutspawn();
-        info!("ls: {:?}", x);
-        use walkdir::WalkDir;
+        info!("In sandbox");
+        info!("Command: {:#?}", cmd);
 
-        for entry in WalkDir::new("/") {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            info!("# path: {:?}", path);
-            if path.is_file() {
-                let file = std::fs::File::open(path).unwrap();
-                file.sync_all().unwrap();
-                info!("path: {:?}", file.metadata().unwrap().len());
-                let contents =
-                    std::fs::read_to_string(path).expect("Should have been able to read the file");
-                info!("contents: {:?}", contents);
+        // Collect Env variables for the new command
+        let env_vars: Vec<(String, String)> = cmd
+            .environment_variables
+            .iter()
+            .map(|ev| (ev.name.clone(), ev.value.clone()))
+            .collect();
+
+        // Create directories for all output files
+        for output in cmd.output_files.iter().map(PathBuf::from) {
+            if let Some(prefix) = output.parent() {
+                std::fs::create_dir_all(prefix).unwrap();
             }
         }
+
+        unsafe {
+            libc::setpgid(0, 0);
+            libc::umask(022);
+        }
+
+        let cmd = std::process::Command::new(&cmd.arguments[0])
+            .args(&cmd.arguments[1..])
+            .envs(env_vars)
+            .output()
+            .expect("failed to execute process");
+
+        info!("Command: {:?}", std::str::from_utf8(&cmd.stdout));
     })?;
     Ok(())
 }
@@ -180,12 +202,9 @@ fn setup_mount_namespace() -> io::Result<()> {
 }
 
 fn create_empty_file() -> io::Result<()> {
+    std::fs::create_dir_all("tmp/")?;
     let path = std::path::Path::new("tmp/empty_file");
-    if let Some(prefix) = path.parent() {
-        std::fs::create_dir_all(prefix)?;
-    }
     std::fs::File::create(path)?;
-
     Ok(())
 }
 
@@ -196,7 +215,7 @@ pub fn path_to_cstring<P: AsRef<Path>>(path: &P) -> Option<std::ffi::CString> {
 }
 
 fn mount_mounts(path: &Path, mount_mapping: Vec<Mapping>) -> io::Result<()> {
-    let empty_file = CString::new("/home/ben/workspace/gaudi/sandbox/tmp/empty_file")?;
+    // let empty_file = CString::new("/home/ben/workspace/gaudi/sandbox/tmp/empty_file")?;
 
     // let dot = path_to_cstring(&path).unwrap();
     // err_check(unsafe {
@@ -235,7 +254,8 @@ fn mount_mounts(path: &Path, mount_mapping: Vec<Mapping>) -> io::Result<()> {
                 src.as_ptr(),
                 target.as_ptr(),
                 ptr::null(),
-                libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY,
+                //libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY,
+                libc::MS_BIND | libc::MS_REC,
                 ptr::null(),
             )
         })?;
@@ -279,6 +299,23 @@ fn change_root() -> io::Result<()> {
     Ok(())
 }
 
+fn mount_dev() -> io::Result<()> {
+    std::fs::create_dir_all("dev")?;
+    std::fs::File::create("dev/null")?;
+    for dev in ["/dev/null"].map(PathBuf::from) {
+        let dev_mnt = path_to_cstring(&dev).unwrap();
+        err_check(unsafe {
+            libc::mount(
+                dev_mnt.as_ptr(),
+                dev_mnt.as_bytes()[1..].as_ptr() as *const i8,
+                ptr::null(),
+                libc::MS_BIND,
+                ptr::null(),
+            )
+        })?;
+    }
+    Ok(())
+}
 fn mount_proc() -> io::Result<()> {
     let proc_mnt = CString::new("/proc")?;
     let proc = CString::new("proc")?;
@@ -371,7 +408,10 @@ where
             //network_namespace()?;
             info!("\t Mount Sandbox...");
             mount_sandbox(Path::new("/home/ben/workspace/gaudi/sandbox"))?;
+            info!("\t Create empty file...");
             create_empty_file()?;
+            info!("\t Mount Dev...");
+            mount_dev()?;
             info!("\t Mount Proc...");
             mount_proc()?;
             info!("\t Mount mounts...");
