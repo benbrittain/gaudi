@@ -1,0 +1,11 @@
+build --incompatible_strict_action_env
+build --incompatible_enable_cc_toolchain_resolution=true
+build --incompatible_use_cc_configure_from_rules_cc=true
+test --test_output=errors
+
+# Only download the final result, the intermediate files can stay on the server side.
+# build --remote_download_toplevel
+
+build:remote-exec --remote_executor=grpc://localhost:8980
+build:remote-exec --remote_instance_name=remote-execution
+build:remote-exec --jobs=64
