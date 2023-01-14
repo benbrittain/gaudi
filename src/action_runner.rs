@@ -135,8 +135,7 @@ pub async fn run(
             .expect("failed to execute process");
 
         info!("Command: {:?}", std::str::from_utf8(&cmd.stdout));
-    })?;
-    Ok(())
+    }).map_err(Into::into)
 }
 
 fn mount_sandbox(path: &Path) -> io::Result<()> {

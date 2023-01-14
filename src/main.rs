@@ -7,11 +7,11 @@ mod services;
 use crate::services::*;
 
 mod action;
-mod action_runner;
 mod api;
 mod blob;
 mod content_storage;
 mod execution_runner;
+mod sandboxed_action;
 use content_storage::ContentStorage;
 use execution_runner::ExecutionRunner;
 

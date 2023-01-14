@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 tonic = "0.8"
 prost = "0.11"
-tokio = { version = "1.0", features = ["fs", "macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1.0", features = ["fs", "macros", "rt-multi-thread", "io-util", "process"] }
 prost-types = "0.11.5"
 tokio-stream = "0.1.11"
 async-stream = "0.3.3"
