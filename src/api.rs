@@ -7,6 +7,8 @@ pub use build::bazel::semver::SemVer;
 pub use google::bytestream::byte_stream_server::*;
 pub use google::bytestream::*;
 pub use google::longrunning;
+pub use google::longrunning::operations_server::*;
+pub use google::longrunning::*;
 
 mod google {
     pub mod longrunning {
