@@ -9,6 +9,7 @@ pub use google::bytestream::*;
 pub use google::longrunning;
 pub use google::longrunning::operations_server::*;
 pub use google::longrunning::*;
+pub use google::rpc::Status;
 
 mod google {
     pub mod longrunning {

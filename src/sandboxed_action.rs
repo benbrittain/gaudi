@@ -4,8 +4,7 @@ use std::{
     io::{self, Write},
     os::fd::RawFd,
     path::{Path, PathBuf},
-    pin::Pin,
-    ptr, task,
+    ptr,
 };
 use tokio::io::unix::AsyncFd;
 use tracing::{info, instrument, span, Level};
@@ -36,15 +35,6 @@ impl AsyncSandboxedAction {
         }
     }
 }
-
-//impl std::future::Future for AsyncSandboxedAction {
-//    type Output = io::Result<()>;
-//    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-//        info!("Polling");
-//        self.inner.get_ref().pow
-//        task::Poll::Ready(Ok(()))
-//    }
-//}
 
 #[derive(Debug, Clone, Default)]
 pub struct SandboxedAction {

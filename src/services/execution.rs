@@ -3,15 +3,15 @@ use crate::sandboxed_action::{Mapping, SandboxedAction};
 use crate::{
     api,
     content_storage::{CasError, ContentStorage},
-    execution_runner::ExecutionRunner,
+    execution_runner::{ActionError, ExecutionRunner, Stage},
 };
 use futures::future::BoxFuture;
-use futures::{pin_mut, Future};
-use prost_types::Duration;
+use prost::Message;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
@@ -58,16 +58,6 @@ fn create_mapping<'a>(
         }
         Ok(())
     })
-}
-
-#[derive(Error, Debug)]
-pub enum ActionError {
-    #[error("I/O: {0}")]
-    SandboxIoError(#[from] std::io::Error),
-    #[error("CAS: {0}")]
-    CasError(#[from] CasError),
-    #[error("Unknown")]
-    Unknown,
 }
 
 async fn run_action(
@@ -153,32 +143,26 @@ impl api::Execution for ExecutionService {
 
         info!("command: {:?}", command_digest);
 
-        let mut action_fut = Box::pin(run_action(self.cas.clone(), command_digest, root_digest));
+        let action_fut = Box::pin(run_action(self.cas.clone(), command_digest, root_digest));
 
         let (tx, rx) = mpsc::channel(128);
-        let uuid = uuid::Uuid::new_v4();
-        let mut init_op = Box::pin(async move {
-            let op = api::Operation {
-                name: uuid.to_string(),
-                done: false,
-                result: None,
-                metadata: None,
-            };
-            //    tx.send(Result::<_, Status>::Ok(op)).await.unwrap();
-        });
+        let (uuid, mut action_stream) = self.exec_runner.queue(action_fut);
 
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased ;
-                    resp = &mut action_fut => {
-                        info!("Resp: {:#?}", resp);
-                        ()
+            while let Some(stage) = action_stream.next().await {
+                let op = match stage {
+                    Stage::Completed => {
+                        let (metadata, result) = create_result();
+                        api::Operation {
+                            name: uuid.to_string(),
+                            done: true,
+                            metadata,
+                            result,
+                        }
                     }
-                    //_ = &mut init_op => {
-                    //    ()
-                    //}
-                }
+                    _ => todo!(),
+                };
+                tx.send(Result::<_, Status>::Ok(op)).await.unwrap();
             }
         });
 
@@ -196,4 +180,53 @@ impl api::Execution for ExecutionService {
         info!("{:?}", request);
         todo!()
     }
+}
+
+fn create_result() -> (Option<prost_types::Any>, Option<api::operation::Result>) {
+    let result = api::ActionResult {
+        output_files: vec![],
+        output_file_symlinks: vec![],
+        output_symlinks: vec![],
+        output_directories: vec![],
+        output_directory_symlinks: vec![],
+        exit_code: 0,
+        execution_metadata: None,
+        stdout_digest: None,
+        stderr_digest: None,
+        stdout_raw: vec![],
+        stderr_raw: vec![],
+    };
+    let response = api::ExecuteResponse {
+        result: Some(result),
+        cached_result: false,
+        status: Some(api::Status {
+            code: 0,
+            message: "status ok ben".to_string(),
+            details: vec![],
+        }),
+        server_logs: HashMap::new(),
+        message: String::from("TODO BEN"),
+    };
+
+    let metadata: api::ExecuteOperationMetadata = api::ExecuteOperationMetadata {
+        stage: api::execution_stage::Value::Completed.into(),
+        action_digest: None,
+        stdout_stream_name: String::from(""),
+        stderr_stream_name: String::from(""),
+    };
+
+    (
+        Some(prost_types::Any {
+            type_url: String::from(
+                "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteOperationMetadata",
+            ),
+            value: metadata.encode_to_vec(),
+        }),
+        Some(api::operation::Result::Response(prost_types::Any {
+            type_url: String::from(
+                "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse",
+            ),
+            value: response.encode_to_vec(),
+        })),
+    )
 }

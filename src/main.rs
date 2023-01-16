@@ -39,9 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Initialized.");
 
+    // generic remote build structures
     let content_storage = ContentStorage::new(cas_dir)?;
     let execution_runner = ExecutionRunner::new();
+    //execution_runner.spawn();
 
+    // gRPC RBE services
     let exec = ExecutionService::new(content_storage.clone(), execution_runner);
     let cas = ContentStorageService::default();
     let caps = CapabilitiesService::default();
