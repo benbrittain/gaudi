@@ -1,7 +1,6 @@
-use crate::api::Operation;
-use crate::sandboxed_action::{Mapping, SandboxedAction};
 use crate::{
     api,
+    sandboxed_action::{Mapping, SandboxedAction},
     content_storage::{CasError, ContentStorage},
     execution_runner::{ActionError, ExecutionRunner, Stage},
 };
@@ -67,6 +66,11 @@ async fn run_action(
 ) -> Result<(), ActionError> {
     let cmd: api::Command = cas.get_proto("remote-execution", &command_digest).await?;
     let root: api::Directory = cas.get_proto("remote-execution", &root_digest).await?;
+
+    if !cmd.output_paths.is_empty() {
+        panic!("output paths is set but we only support v2.0 for now");
+    }
+
     info!("Command: {:#?}", cmd);
     info!("Root: {:#?}", root);
     let env_vars: Vec<(String, String)> = cmd
