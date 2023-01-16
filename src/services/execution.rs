@@ -1,3 +1,4 @@
+use crate::api::Operation;
 use crate::sandboxed_action::{Mapping, SandboxedAction};
 use crate::{
     api,
@@ -5,6 +6,7 @@ use crate::{
     execution_runner::ExecutionRunner,
 };
 use futures::future::BoxFuture;
+use futures::{pin_mut, Future};
 use prost_types::Duration;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -69,13 +71,14 @@ pub enum ActionError {
 }
 
 async fn run_action(
-    cas: &ContentStorage,
+    cas: ContentStorage,
     command_digest: api::Digest,
     root_digest: api::Digest,
-    timeout: Option<Duration>,
 ) -> Result<(), ActionError> {
     let cmd: api::Command = cas.get_proto("remote-execution", &command_digest).await?;
     let root: api::Directory = cas.get_proto("remote-execution", &root_digest).await?;
+    info!("Command: {:#?}", cmd);
+    info!("Root: {:#?}", root);
     let env_vars: Vec<(String, String)> = cmd
         .environment_variables
         .iter()
@@ -84,27 +87,26 @@ async fn run_action(
 
     let mut mappings = vec![];
     create_mapping(
-        cas,
+        &cas,
         root,
         PathBuf::from("/home/ben/workspace/gaudi/sandbox"),
         &mut mappings,
     )
     .await?;
 
-    //    let mut action = SandboxedAction::new("sleep")
-    //        .args(&[String::from("sleep")])
-    //        .args(&[String::from("5")])
-    //        .envs(&env_vars)
     let mut action = SandboxedAction::new(&cmd.arguments[0])
-        .args(&cmd.arguments[1..])
+        .args(&cmd.arguments[..])
         .envs(&env_vars)
         .input_file_mapping(&mappings)
-        .input_file("/usr/bin/sleep")
-        .input_file("/usr/bin/g++")
-        .input_file("/usr/bin/gcc")
-        .input_file("/usr/lib/libc.so.6")
-        .input_file("/usr/lib/libcap.so.2")
+        .input_file("/usr/bin/")
+        .input_file("/usr/lib/")
+        .input_file("/usr/include/")
+        .input_file("/usr/local/include/")
         .input_file("/lib64/ld-linux-x86-64.so.2")
+        .input_file("/lib/gcc/x86_64-pc-linux-gnu/")
+        .input_file("/usr/include/c++/12.2.0/")
+        .input_file("/usr/local/include")
+        .input_file("/usr/include/")
         .output_files(
             &cmd.output_files
                 .iter()
@@ -114,8 +116,7 @@ async fn run_action(
 
     info!("Running action...");
     let spawned_action = action.spawn()?;
-    spawned_action.status().await?;
-    Ok(())
+    spawned_action.status().await.map_err(Into::into)
 }
 
 #[tonic::async_trait]
@@ -152,38 +153,35 @@ impl api::Execution for ExecutionService {
 
         info!("command: {:?}", command_digest);
 
-        let resp = run_action(&self.cas, command_digest, root_digest, action.timeout).await;
-        info!("Resp: {:#?}", resp);
+        let mut action_fut = Box::pin(run_action(self.cas.clone(), command_digest, root_digest));
 
-        // TODO this needs to return the actual build status
         let (tx, rx) = mpsc::channel(128);
-        tokio::spawn(async move {
-            //while let Some(item) = stream.next().await {
-            //}
+        let uuid = uuid::Uuid::new_v4();
+        let mut init_op = Box::pin(async move {
             let op = api::Operation {
-                name: "test".to_string(),
+                name: uuid.to_string(),
                 done: false,
                 result: None,
                 metadata: None,
-                // Some(Box::new(api::ExecuteOperationMetadata {
-
-                // }) as Box<dyn any::Any>),
             };
-            //            while let Some(item) = stream.next().await {
-            match tx.send(Result::<_, Status>::Ok(op)).await {
-                Ok(_) => {
-                    // item (server response) was queued to be send to client
-                }
-                Err(_item) => {
-                    // output_stream was build from rx and both are dropped
-                    //                      break;
-                }
-            }
-            //           }
-            println!("\tclient disconnected");
+            //    tx.send(Result::<_, Status>::Ok(op)).await.unwrap();
         });
 
-        //        tx.send(Operation {});
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased ;
+                    resp = &mut action_fut => {
+                        info!("Resp: {:#?}", resp);
+                        ()
+                    }
+                    //_ = &mut init_op => {
+                    //    ()
+                    //}
+                }
+            }
+        });
+
         let output_stream = ReceiverStream::new(rx);
         Ok(Response::new(output_stream as Self::ExecuteStream))
     }

@@ -49,6 +49,7 @@ impl AsyncSandboxedAction {
 #[derive(Debug, Clone, Default)]
 pub struct SandboxedAction {
     program: String,
+    sandbox_location: PathBuf,
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
     output_files: Vec<PathBuf>,
@@ -59,6 +60,7 @@ impl SandboxedAction {
     pub fn new(program: &str) -> Self {
         SandboxedAction {
             program: program.into(),
+            sandbox_location: PathBuf::from("/home/ben/workspace/gaudi/sandbox"),
             ..Default::default()
         }
     }
@@ -84,14 +86,15 @@ impl SandboxedAction {
     }
 
     pub fn input_file(mut self, path: &str) -> Self {
+        let source_path = PathBuf::from(path);
         self.input_files.push(Mapping {
-            dest_path: PathBuf::from(format!("/home/ben/workspace/gaudi/sandbox/{}", path)),
-            source_path: PathBuf::from(path),
+            dest_path: PathBuf::from(format!("{}/{}", self.sandbox_location.display(), path)),
+            source_path,
         });
         self
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     pub fn spawn(&mut self) -> io::Result<AsyncSandboxedAction> {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
@@ -128,6 +131,7 @@ impl SandboxedAction {
 
                 unsafe {
                     let c = CString::new(self.program.as_str())?;
+                    info!("cmd: {:?}", c);
                     let args = self
                         .arguments
                         .iter()
@@ -140,17 +144,27 @@ impl SandboxedAction {
                         .collect::<Vec<*const libc::c_char>>();
                     argv.push(std::ptr::null());
 
-                    let mut env = self
+                    let env = self
                         .environment
                         .iter()
                         .map(|arg| format!("{}={}", arg.0, arg.1))
                         .map(|arg| CString::new(arg.as_str()).unwrap())
                         .collect::<Vec<CString>>();
+                    info!("env: {:?}", env);
                     let mut envv = env
                         .iter()
                         .map(|arg| arg.as_ptr())
                         .collect::<Vec<*const libc::c_char>>();
                     envv.push(std::ptr::null());
+
+                    // Create directories for all output files
+                    for output in self.output_files.iter() {
+                        if let Some(prefix) = output.parent() {
+                            std::fs::create_dir_all(prefix).unwrap();
+                        }
+                    }
+                    libc::setpgid(0, 0);
+                    libc::umask(022);
 
                     err_check(libc::execvpe(c.as_ptr(), argv.as_ptr(), envv.as_ptr()))?;
                 }
@@ -269,10 +283,14 @@ fn mount_mounts(path: &Path, mount_mapping: &[Mapping]) -> io::Result<()> {
         );
 
         // create a file to bind against at the depth
-        if let Some(prefix) = mount.dest_path.parent() {
-            std::fs::create_dir_all(prefix)?;
+        if mount.source_path.is_file() {
+            if let Some(prefix) = mount.dest_path.parent() {
+                std::fs::create_dir_all(prefix)?;
+            }
+            std::fs::File::create(&mount.dest_path)?;
+        } else {
+            std::fs::create_dir_all(&mount.dest_path)?;
         }
-        std::fs::File::create(&mount.dest_path)?;
 
         let src = path_to_cstring(&mount.source_path).unwrap();
         let target = path_to_cstring(&mount.dest_path).unwrap();
