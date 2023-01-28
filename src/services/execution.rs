@@ -1,8 +1,8 @@
 use crate::{
     api,
-    sandboxed_action::{Mapping, SandboxedAction},
     content_storage::{CasError, ContentStorage},
     execution_runner::{ActionError, ExecutionRunner, Stage},
+    sandboxed_action::{Mapping, SandboxedAction, StatusCode},
 };
 use futures::future::BoxFuture;
 use prost::Message;
@@ -63,7 +63,7 @@ async fn run_action(
     cas: ContentStorage,
     command_digest: api::Digest,
     root_digest: api::Digest,
-) -> Result<(), ActionError> {
+) -> Result<StatusCode, ActionError> {
     let cmd: api::Command = cas.get_proto("remote-execution", &command_digest).await?;
     let root: api::Directory = cas.get_proto("remote-execution", &root_digest).await?;
 

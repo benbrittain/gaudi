@@ -1,4 +1,6 @@
 use crate::action::platform::linux::{clone3, syscall_2};
+use libc::siginfo_t;
+use std::mem::MaybeUninit;
 use std::{
     ffi::CString,
     io::{self, Write},
@@ -19,15 +21,28 @@ pub struct AsyncSandboxedAction {
     inner: AsyncFd<RawFd>,
 }
 
+pub struct StatusCode(i32);
+
 impl AsyncSandboxedAction {
-    pub async fn status(&self) -> io::Result<()> {
+    pub async fn status(&self) -> io::Result<StatusCode> {
         loop {
             let mut guard = self.inner.readable().await?;
 
             match guard.try_io(|inner| {
                 info!("Got a pidfd update");
-
-                Ok(())
+                unsafe {
+                    let mut infop: libc::siginfo_t = std::mem::zeroed();
+                    let id = (*inner.get_ref()) as u32;
+                    err_check(libc::waitid(libc::P_PIDFD, id, &mut infop, libc::WEXITED))?;
+                    assert_eq!(infop.si_signo, libc::SIGCHLD);
+                    match infop.si_code {
+                        libc::CLD_EXITED => {
+                            info!("exited with status: {}", infop.si_code);
+                            return Ok(StatusCode(infop.si_code));
+                        }
+                        c => panic!("new code: {}", c),
+                    };
+                }
             }) {
                 Ok(result) => return result,
                 Err(_would_block) => continue,

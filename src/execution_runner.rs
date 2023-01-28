@@ -1,4 +1,5 @@
 use crate::content_storage::CasError;
+use crate::sandboxed_action::StatusCode;
 use futures::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -24,7 +25,7 @@ pub enum Stage {
 }
 
 pub struct ActionStatus {
-    future: Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send>>,
+    future: Pin<Box<dyn Future<Output = Result<StatusCode, ActionError>> + Send>>,
     completed: bool,
 }
 
@@ -57,7 +58,7 @@ impl ExecutionRunner {
 
     pub fn queue<F>(&self, future: F) -> (Uuid, ActionStatus)
     where
-        F: Future<Output = Result<(), ActionError>> + Send + 'static,
+        F: Future<Output = Result<StatusCode, ActionError>> + Send + 'static,
     {
         let uuid = Uuid::new_v4();
         (
