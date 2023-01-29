@@ -90,9 +90,7 @@ impl ContentStorage {
 
         let mut hasher = Sha256::new();
         hasher.update(&buf);
-
-        let mut hash_buf = hasher.finalize();
-        let raw = b"\xab\xcd\x12\x34";
+        let hash_buf = hasher.finalize();
         let hex_hash = base16ct::lower::encode_string(&hash_buf);
         info!("hash: {}", hex_hash);
         let mut blob = self.get_blob(instance, &hex_hash).await?;

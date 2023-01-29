@@ -6,9 +6,10 @@ use crate::{
 };
 use futures::future::BoxFuture;
 use prost::Message;
-use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
+use std::{collections::HashMap, os::fd::FromRawFd};
+use tokio::{io::AsyncReadExt, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -237,13 +238,27 @@ async fn create_result(
             todo!()
         }
     }
+    let stderr_digest = cas
+        .add_new_blob_from_file("remote-execution", &resp.stderr)
+        .await?;
+    let stdout_digest = cas
+        .add_new_blob_from_file("remote-execution", &resp.stdout)
+        .await?;
     info!("{:#?}", output_files);
-    Ok(format_result(output_files, action_digest, resp))
+    Ok(format_result(
+        output_files,
+        action_digest,
+        stdout_digest,
+        stderr_digest,
+        resp,
+    ))
 }
 
 fn format_result(
     output_files: Vec<api::OutputFile>,
     action_digest: api::Digest,
+    stdout_digest: api::Digest,
+    stderr_digest: api::Digest,
     resp: SandboxedActionResp,
 ) -> ActionResult {
     // TODO
@@ -255,10 +270,10 @@ fn format_result(
         output_directory_symlinks: vec![],
         exit_code: resp.status_code,
         execution_metadata: None,
-        stdout_digest: None,
-        stderr_digest: None,
-        stdout_raw: b"testing out ".to_vec(),
-        stderr_raw: b"testing err".to_vec(),
+        stdout_digest: Some(stdout_digest),
+        stderr_digest: Some(stderr_digest),
+        stdout_raw: vec![],
+        stderr_raw: vec![],
     };
     let response = api::ExecuteResponse {
         result: Some(result),

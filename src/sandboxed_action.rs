@@ -2,7 +2,7 @@ use crate::action::platform::linux::{clone3, syscall_2};
 use std::{
     ffi::CString,
     io::{self, Write},
-    os::fd::RawFd,
+    os::fd::{FromRawFd, IntoRawFd, RawFd},
     path::{Path, PathBuf},
     ptr,
 };
@@ -18,12 +18,16 @@ pub struct Mapping {
 pub struct AsyncSandboxedAction {
     inner: AsyncFd<RawFd>,
     output_files_map: Vec<Mapping>,
+    stdout: PathBuf,
+    stderr: PathBuf,
 }
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct SandboxedActionResp {
     pub status_code: i32,
     pub output_paths: Vec<Mapping>,
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
 }
 
 impl AsyncSandboxedAction {
@@ -41,9 +45,13 @@ impl AsyncSandboxedAction {
                     match infop.si_code {
                         libc::CLD_EXITED => {
                             info!("exited with status: {}", infop.si_code);
+                            let stdout = self.stdout.clone();
+                            let stderr = self.stderr.clone();
                             return Ok(SandboxedActionResp {
                                 status_code: infop.si_status(),
                                 output_paths: self.output_files_map.clone(),
+                                stdout,
+                                stderr,
                             });
                         }
                         c => panic!("new code: {}", c),
@@ -66,13 +74,34 @@ pub struct SandboxedAction {
     output_files: Vec<PathBuf>,
     input_files: Vec<Mapping>,
     output_files_map: Vec<Mapping>,
+    stdout: (PathBuf, RawFd),
+    stderr: (PathBuf, RawFd),
 }
 
 impl SandboxedAction {
     pub fn new(program: &str) -> Self {
+        let stderr_path = format!("/tmp/{}", uuid::Uuid::new_v4()).into();
+        let err_temp_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&stderr_path)
+            .unwrap();
+        let stderr_fd = err_temp_file.into_raw_fd();
+        let stdout_path = format!("/tmp/{}", uuid::Uuid::new_v4()).into();
+        let std_temp_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&stdout_path)
+            .unwrap();
+        let stdout_fd = std_temp_file.into_raw_fd();
+
         SandboxedAction {
             program: program.into(),
             sandbox_location: PathBuf::from("/home/ben/workspace/gaudi/sandbox"),
+            stdout: (stdout_path, stdout_fd),
+            stderr: (stderr_path, stderr_fd),
             ..Default::default()
         }
     }
@@ -130,6 +159,7 @@ impl SandboxedAction {
                 // Kill with SIGKILL if Parent dies
                 err_check(libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL))?;
             }
+
             child_span.in_scope(|| {
                 info!("Setting up spandboxed process...");
 
@@ -198,6 +228,11 @@ impl SandboxedAction {
                     libc::setpgid(0, 0);
                     libc::umask(022);
 
+                    // Redirect stderr/stdout to a file
+                    err_check(libc::dup2(self.stderr.1, libc::STDERR_FILENO))?;
+                    err_check(libc::dup2(self.stdout.1, libc::STDOUT_FILENO))?;
+
+                    // start the worker process
                     err_check(libc::execvpe(c.as_ptr(), argv.as_ptr(), envv.as_ptr()))?;
                 }
 
@@ -212,6 +247,8 @@ impl SandboxedAction {
             Ok(AsyncSandboxedAction {
                 inner,
                 output_files_map: self.output_files_map.clone(),
+                stderr: self.stderr.0.clone(),
+                stdout: self.stdout.0.clone(),
             })
         }
     }
