@@ -19,6 +19,9 @@ openat2 = "0.1.2"
 # tracing-test = "0.2.3"
 walkdir = "2.3.2"
 futures = "0.3.25"
+tempfile = "3.3.0"
+sha2 = "0.10.6"
+base16ct = {version = "*", features = ["std"]}
 
 [dependencies.uuid]
 version = "1.2.2"

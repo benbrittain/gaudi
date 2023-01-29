@@ -2,12 +2,12 @@ use crate::{
     api,
     content_storage::{CasError, ContentStorage},
     execution_runner::{ActionError, ExecutionRunner, Stage},
-    sandboxed_action::{Mapping, SandboxedAction, StatusCode},
+    sandboxed_action::{Mapping, SandboxedAction, SandboxedActionResp},
 };
 use futures::future::BoxFuture;
 use prost::Message;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -16,12 +16,17 @@ use tracing::{info, instrument};
 
 pub struct ExecutionService {
     cas: ContentStorage,
+    sandbox_root: PathBuf,
     exec_runner: ExecutionRunner,
 }
 
 impl ExecutionService {
-    pub fn new(cas: ContentStorage, exec_runner: ExecutionRunner) -> Self {
-        ExecutionService { cas, exec_runner }
+    pub fn new(cas: ContentStorage, sandbox_root: PathBuf, exec_runner: ExecutionRunner) -> Self {
+        ExecutionService {
+            cas,
+            sandbox_root,
+            exec_runner,
+        }
     }
 }
 
@@ -63,7 +68,7 @@ async fn run_action(
     cas: ContentStorage,
     command_digest: api::Digest,
     root_digest: api::Digest,
-) -> Result<StatusCode, ActionError> {
+) -> Result<SandboxedActionResp, ActionError> {
     let cmd: api::Command = cas.get_proto("remote-execution", &command_digest).await?;
     let root: api::Directory = cas.get_proto("remote-execution", &root_digest).await?;
 
@@ -94,6 +99,7 @@ async fn run_action(
         .input_file_mapping(&mappings)
         .input_file("/usr/bin/")
         .input_file("/usr/lib/")
+        .input_file("/usr/lib64/")
         .input_file("/usr/include/")
         .input_file("/usr/local/include/")
         .input_file("/lib64/ld-linux-x86-64.so.2")
@@ -145,18 +151,28 @@ impl api::Execution for ExecutionService {
             .input_root_digest
             .ok_or(Status::invalid_argument("Invalid Action: no root digest"))?;
 
-        info!("command: {:?}", command_digest);
+        info!("command digest: {:?}", command_digest);
 
         let action_fut = Box::pin(run_action(self.cas.clone(), command_digest, root_digest));
 
         let (tx, rx) = mpsc::channel(128);
         let (uuid, mut action_stream) = self.exec_runner.queue(action_fut);
 
+        let cas = self.cas.clone();
+        let sandbox_root = self.sandbox_root.clone();
         tokio::spawn(async move {
             while let Some(stage) = action_stream.next().await {
+                info!("=============== STAGE : {:?} =============== ", stage);
                 let op = match stage {
-                    Stage::Completed => {
-                        let (metadata, result) = create_result();
+                    Stage::Completed(resp) => {
+                        info!("Completed: {:?}", resp);
+                        let (metadata, result) = create_result(
+                            cas.clone(),
+                            sandbox_root.clone(),
+                            action_digest.clone(),
+                            resp,
+                        )
+                        .await?;
                         api::Operation {
                             name: uuid.to_string(),
                             done: true,
@@ -164,10 +180,17 @@ impl api::Execution for ExecutionService {
                             result,
                         }
                     }
-                    _ => todo!(),
+                    _ => api::Operation {
+                        name: uuid.to_string(),
+                        done: false,
+                        metadata: None,
+                        result: None,
+                    },
                 };
+                info!("Operation: {:?}", op);
                 tx.send(Result::<_, Status>::Ok(op)).await.unwrap();
             }
+            Ok::<(), CasError>(())
         });
 
         let output_stream = ReceiverStream::new(rx);
@@ -186,38 +209,78 @@ impl api::Execution for ExecutionService {
     }
 }
 
-fn create_result() -> (Option<prost_types::Any>, Option<api::operation::Result>) {
+pub type ActionResult = (Option<prost_types::Any>, Option<api::operation::Result>);
+
+async fn create_result(
+    cas: ContentStorage,
+    sandbox_path: PathBuf,
+    action_digest: api::Digest,
+    resp: SandboxedActionResp,
+) -> Result<ActionResult, CasError> {
+    let mut output_files = vec![];
+
+    for mapping in &resp.output_paths {
+        dbg!(&mapping);
+        if mapping.source_path.is_file() {
+            let digest = cas
+                .add_new_blob_from_file("remote-execution", &mapping.source_path)
+                .await?;
+            let path = mapping.dest_path.strip_prefix(&sandbox_path).unwrap();
+            output_files.push(api::OutputFile {
+                path: path.to_str().unwrap().to_string(),
+                digest: Some(digest),
+                is_executable: false,
+                contents: vec![],
+                node_properties: None,
+            })
+        } else {
+            todo!()
+        }
+    }
+    info!("{:#?}", output_files);
+    Ok(format_result(output_files, action_digest, resp))
+}
+
+fn format_result(
+    output_files: Vec<api::OutputFile>,
+    action_digest: api::Digest,
+    resp: SandboxedActionResp,
+) -> ActionResult {
+    // TODO
     let result = api::ActionResult {
-        output_files: vec![],
+        output_files,
         output_file_symlinks: vec![],
         output_symlinks: vec![],
         output_directories: vec![],
         output_directory_symlinks: vec![],
-        exit_code: 0,
+        exit_code: resp.status_code,
         execution_metadata: None,
         stdout_digest: None,
         stderr_digest: None,
-        stdout_raw: vec![],
-        stderr_raw: vec![],
+        stdout_raw: b"testing out ".to_vec(),
+        stderr_raw: b"testing err".to_vec(),
     };
     let response = api::ExecuteResponse {
         result: Some(result),
         cached_result: false,
         status: Some(api::Status {
             code: 0,
-            message: "status ok ben".to_string(),
+            message: "".to_string(),
             details: vec![],
         }),
         server_logs: HashMap::new(),
-        message: String::from("TODO BEN"),
+        message: String::from(""),
     };
 
     let metadata: api::ExecuteOperationMetadata = api::ExecuteOperationMetadata {
         stage: api::execution_stage::Value::Completed.into(),
-        action_digest: None,
+        action_digest: Some(action_digest),
         stdout_stream_name: String::from(""),
         stderr_stream_name: String::from(""),
     };
+
+    info!("metadata: {:#?}", metadata);
+    info!("response: {:#?}", response);
 
     (
         Some(prost_types::Any {

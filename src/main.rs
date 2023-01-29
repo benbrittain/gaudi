@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr = args.addr;
     let cas_dir = args.dir;
+    let sandbox_dir = PathBuf::from("/home/ben/workspace/gaudi/sandbox");
 
     // We rely heavily on openat2
     assert!(openat2::has_openat2());
@@ -42,10 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // generic remote build structures
     let content_storage = ContentStorage::new(cas_dir)?;
     let execution_runner = ExecutionRunner::new();
-    //execution_runner.spawn();
+    //    execution_runner.spawn();
 
     // gRPC RBE services
-    let exec = ExecutionService::new(content_storage.clone(), execution_runner);
+    let exec = ExecutionService::new(content_storage.clone(), sandbox_dir, execution_runner);
     let cas = ContentStorageService::default();
     let caps = CapabilitiesService::default();
     let ops = OperationsService::new();

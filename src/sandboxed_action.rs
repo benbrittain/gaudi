@@ -1,6 +1,4 @@
 use crate::action::platform::linux::{clone3, syscall_2};
-use libc::siginfo_t;
-use std::mem::MaybeUninit;
 use std::{
     ffi::CString,
     io::{self, Write},
@@ -11,7 +9,7 @@ use std::{
 use tokio::io::unix::AsyncFd;
 use tracing::{info, instrument, span, Level};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Mapping {
     pub dest_path: PathBuf,
     pub source_path: PathBuf,
@@ -19,12 +17,17 @@ pub struct Mapping {
 
 pub struct AsyncSandboxedAction {
     inner: AsyncFd<RawFd>,
+    output_files_map: Vec<Mapping>,
 }
 
-pub struct StatusCode(i32);
+#[derive(PartialEq, Clone, Debug)]
+pub struct SandboxedActionResp {
+    pub status_code: i32,
+    pub output_paths: Vec<Mapping>,
+}
 
 impl AsyncSandboxedAction {
-    pub async fn status(&self) -> io::Result<StatusCode> {
+    pub async fn status(&self) -> io::Result<SandboxedActionResp> {
         loop {
             let mut guard = self.inner.readable().await?;
 
@@ -38,7 +41,10 @@ impl AsyncSandboxedAction {
                     match infop.si_code {
                         libc::CLD_EXITED => {
                             info!("exited with status: {}", infop.si_code);
-                            return Ok(StatusCode(infop.si_code));
+                            return Ok(SandboxedActionResp {
+                                status_code: infop.si_status(),
+                                output_paths: self.output_files_map.clone(),
+                            });
                         }
                         c => panic!("new code: {}", c),
                     };
@@ -59,6 +65,7 @@ pub struct SandboxedAction {
     environment: Vec<(String, String)>,
     output_files: Vec<PathBuf>,
     input_files: Vec<Mapping>,
+    output_files_map: Vec<Mapping>,
 }
 
 impl SandboxedAction {
@@ -82,6 +89,19 @@ impl SandboxedAction {
 
     pub fn output_files(mut self, output_files: &[PathBuf]) -> Self {
         self.output_files.extend_from_slice(output_files);
+        for output_file in output_files {
+            let temp_file = PathBuf::from(format!("/tmp/{}", uuid::Uuid::new_v4()));
+            std::fs::File::create(&temp_file).unwrap();
+            self.output_files_map.push(Mapping {
+                dest_path: PathBuf::from(format!(
+                    "{}/{}",
+                    self.sandbox_location.display(),
+                    output_file.display()
+                )),
+                source_path: temp_file,
+            });
+        }
+        info!("OUT MAP {:#?}", self.output_files_map);
         self
     }
 
@@ -130,6 +150,13 @@ impl SandboxedAction {
                 mount_mounts(
                     Path::new("/home/ben/workspace/gaudi/sandbox"),
                     &self.input_files,
+                    true,
+                )?;
+                info!("Mounting all output files...");
+                mount_mounts(
+                    Path::new("/home/ben/workspace/gaudi/sandbox"),
+                    &self.output_files_map,
+                    false,
                 )?;
                 info!("Change Root...");
                 change_root()?;
@@ -182,7 +209,10 @@ impl SandboxedAction {
             })?
         } else {
             let inner = AsyncFd::new(pid_fd)?;
-            Ok(AsyncSandboxedAction { inner })
+            Ok(AsyncSandboxedAction {
+                inner,
+                output_files_map: self.output_files_map.clone(),
+            })
         }
     }
 }
@@ -279,7 +309,7 @@ fn mount_proc() -> io::Result<()> {
     })?)
 }
 
-fn mount_mounts(path: &Path, mount_mapping: &[Mapping]) -> io::Result<()> {
+fn mount_mounts(path: &Path, mount_mapping: &[Mapping], readonly: bool) -> io::Result<()> {
     for mount in mount_mapping {
         info!(
             "Binding {} -> {}",
@@ -304,8 +334,11 @@ fn mount_mounts(path: &Path, mount_mapping: &[Mapping]) -> io::Result<()> {
                 src.as_ptr(),
                 target.as_ptr(),
                 ptr::null(),
-                //libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY,
-                libc::MS_BIND | libc::MS_REC,
+                if readonly {
+                    libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY
+                } else {
+                    libc::MS_BIND | libc::MS_REC
+                },
                 ptr::null(),
             )
         })?;

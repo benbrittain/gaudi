@@ -1,5 +1,7 @@
 use crate::{api, content_storage::ContentStorage};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
@@ -18,13 +20,45 @@ impl BytestreamService {
 impl api::ByteStream for BytestreamService {
     type ReadStream = ReceiverStream<Result<api::ReadResponse, Status>>;
 
-    #[instrument(skip_all)]
+    #[instrument(skip(self))]
     async fn read(
         &self,
-        _request: Request<api::ReadRequest>,
+        request: Request<api::ReadRequest>,
     ) -> Result<Response<Self::ReadStream>, Status> {
-        info!("");
-        todo!()
+        // TODO variable read offsets
+        assert_eq!(0, request.get_ref().read_offset);
+        assert_eq!(0, request.get_ref().read_limit);
+        let resource_name = &request.get_ref().resource_name;
+
+        let segments: Vec<&str> = resource_name.split("/").collect();
+        let instance = segments[0];
+        assert_eq!("blobs", segments[1]);
+        let hash = segments[2];
+        let len = segments[3];
+        info!("Reading");
+
+        let (tx, rx) = mpsc::channel(128);
+        let content_store = self.content_store.clone();
+        let instance = instance.clone().to_owned();
+        let hash = hash.clone().to_owned();
+        tokio::spawn(async move {
+            if let Ok(buf) = content_store.read_to_end(&instance, &hash).await {
+                info!("blob size {:?}", buf.len());
+                let op = api::ReadResponse { data: buf };
+                tx.send(Result::<_, Status>::Ok(op)).await.unwrap();
+                info!("Read.");
+            } else {
+                info!("Did not Read!");
+                tx.send(Result::<_, Status>::Err(Status::new(
+                    tonic::Code::Unknown,
+                    "oh no",
+                )))
+                .await
+                .unwrap();
+            }
+        });
+        let output_stream = ReceiverStream::new(rx);
+        Ok(Response::new(output_stream as Self::ReadStream))
     }
 
     #[instrument(skip_all)]

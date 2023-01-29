@@ -1,10 +1,12 @@
 use crate::api;
 use openat2::*;
 use prost::DecodeError;
+use sha2::{Digest, Sha256};
 use std::io;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, instrument};
 use uuid::Uuid;
@@ -74,6 +76,35 @@ impl ContentStorage {
             .map_err(Into::into)
     }
 
+    /// Add a blob from a file location
+    #[instrument(skip(self))]
+    pub async fn add_new_blob_from_file(
+        &self,
+        instance: &str,
+        path: &Path,
+    ) -> Result<api::Digest, CasError> {
+        info!("Reading: {}", path.display());
+        let mut file = File::open(path).await?;
+        let mut buf = vec![];
+        file.read_to_end(&mut buf).await?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&buf);
+
+        let mut hash_buf = hasher.finalize();
+        let raw = b"\xab\xcd\x12\x34";
+        let hex_hash = base16ct::lower::encode_string(&hash_buf);
+        info!("hash: {}", hex_hash);
+        let mut blob = self.get_blob(instance, &hex_hash).await?;
+
+        let _ = blob.file().write(&buf).await?;
+        blob.file().flush().await?;
+        Ok(api::Digest {
+            size_bytes: buf.len() as i64,
+            hash: hex_hash.to_string(),
+        })
+    }
+
     /// Write the specified blob of data to the file.
     #[instrument(skip(self, data))]
     pub async fn write_data(
@@ -93,5 +124,13 @@ impl ContentStorage {
         let bytes_written = blob.file().write(data).await?;
         blob.file().flush().await?;
         Ok(bytes_written)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn read_to_end(&self, instance: &str, hash: &str) -> Result<Vec<u8>, CasError> {
+        let mut buf = vec![];
+        let mut blob = self.get_blob(instance, hash).await?;
+        blob.file().read_to_end(&mut buf).await?;
+        Ok(buf)
     }
 }

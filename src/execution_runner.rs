@@ -1,5 +1,5 @@
 use crate::content_storage::CasError;
-use crate::sandboxed_action::StatusCode;
+use crate::sandboxed_action::SandboxedActionResp;
 use futures::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,34 +17,41 @@ pub enum ActionError {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Stage {
     Queued,
     Executing,
-    Completed,
+    Completed(SandboxedActionResp),
 }
 
 pub struct ActionStatus {
-    future: Pin<Box<dyn Future<Output = Result<StatusCode, ActionError>> + Send>>,
-    completed: bool,
+    future: Pin<Box<dyn Future<Output = Result<SandboxedActionResp, ActionError>> + Send>>,
+    stage: Stage,
 }
 
 impl Stream for ActionStatus {
     type Item = Stage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.completed {
+        if let Stage::Completed(_) = self.stage {
             return Poll::Ready(None);
         }
         match Pin::new(&mut self.future).poll(cx) {
             Poll::Ready(s) => match s {
                 Ok(s) => {
-                    self.completed = true;
-                    Poll::Ready(Some(Stage::Completed))
+                    self.stage = Stage::Completed(s);
+                    Poll::Ready(Some(self.stage.clone()))
                 }
                 Err(_) => todo!(),
             },
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match self.stage {
+                Stage::Queued => {
+                    self.stage = Stage::Executing;
+                    Poll::Ready(Some(self.stage.clone()))
+                }
+                Stage::Executing => Poll::Pending,
+                Stage::Completed(_) => Poll::Ready(None),
+            },
         }
     }
 }
@@ -58,14 +65,14 @@ impl ExecutionRunner {
 
     pub fn queue<F>(&self, future: F) -> (Uuid, ActionStatus)
     where
-        F: Future<Output = Result<StatusCode, ActionError>> + Send + 'static,
+        F: Future<Output = Result<SandboxedActionResp, ActionError>> + Send + 'static,
     {
         let uuid = Uuid::new_v4();
         (
             uuid,
             ActionStatus {
                 future: Box::pin(future),
-                completed: false,
+                stage: Stage::Queued,
             },
         )
     }
